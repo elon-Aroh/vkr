@@ -674,7 +674,7 @@ function kkPush(side,t){
   if(!sec||sec.date!==KK_TODAY){sec={date:KK_TODAY,msgs:[]};kkChat.push(sec);}
   sec.msgs.push([side,t,KK_TIME]);kkSync();
   // 통화 종료 후 '왜 끊냐' 메시지는 채팅을 직접 열어 확인할 때까지 읽지 않은 1로 표시한다.
-  if(side==='them' && t==='왜 끊냐'){
+  if(side==='them' && (t==='왜 끊냐' || t==='자꾸 끊을 거냐?')){
     kakaoChats[0].unread=1;
     if(currentApp==='kakao') renderKakao();
   }
@@ -683,22 +683,50 @@ function kkRefresh(){
   const sc=document.getElementById('kcScroll');
   if(currentApp==='kkchat'&&sc){sc.innerHTML=kkHtml();sc.scrollTop=sc.scrollHeight;}
 }
-const KK_REPLY=[[/보고싶어요/,'간다'],[/사랑해요/,'그래. 나도.']];
-let callBackScriptPending=false;
-let hangupReplyExpected=false;
+// '보고 싶어(요)'는 보낸 횟수에 따라 답이 달라지고, 4번째부터는 읽씹한다.
+let missCount=0;
+const MISS_REPLIES=['간다','간다니까','간다고'];
+const KK_REPLY=[[/보고싶어/,()=>MISS_REPLIES[missCount++]||null],[/사랑해/,'그래. 나도.']];
+let breakupCallAnswered=false;       // '헤어져요' 전화를 받아서 바로 끊긴 상태
+let hangupReplyExpected=false;       // '왜 끊냐'가 온 상태
+let repeatHangupReplyExpected=false; // '자꾸 끊을 거냐?'가 온 상태
+let moondaeCallOutcomes=[];          // 직접 건 통화 결과 기록: 'full'(끝까지 들음) / 'cut'(중간에 끊음)
 function kkAuto(t){
   const n=t.replace(/[\s.,!?~^]/g,'');
+  // '자꾸 끊을 거냐?'가 온 뒤에는 어떤 답장을 보내든 무조건 문대 씨가 다시 전화를 건다.
+  if(repeatHangupReplyExpected){
+    repeatHangupReplyExpected=false;
+    setTimeout(()=>kkIncomingCall(CALL_SCRIPT_RETRY),1400);
+    return;
+  }
+  // '나 사랑해요?' -> 문대 씨가 전화를 건다.
+  if(/나사랑해요/.test(n)||(/나사랑해/.test(n)&&/[?？]/.test(t))){
+    setTimeout(()=>kkIncomingCall(CALL_SCRIPT_LOVE),1200);
+    return;
+  }
+  // '콩이'와 '보고 싶'이 함께 들어간 메시지 -> 보고 싶어 횟수에는 포함하지 않고 따로 답한다.
+  if(/콩이/.test(n)&&/보고싶/.test(n)){
+    setTimeout(()=>{kkPush('them','콩이한테 내가 간식 좀 샀다고 전해줘라.');kkRefresh();},1100);
+    return;
+  }
+  // '헤어져요' 전화가 바로 끊긴 뒤 '왜 끊어(요)?'라고 물으면 미룬다.
+  if(breakupCallAnswered&&/왜끊어/.test(n)){
+    setTimeout(()=>{kkPush('them','나중에 얘기해');kkRefresh();},1100);
+    return;
+  }
   const r=KK_REPLY.find(x=>x[0].test(n));
-  if(r)setTimeout(()=>{kkPush('them',r[1]);kkRefresh();},1100);
-  else if(/헤어져요/.test(n))setTimeout(kkIncomingCall,1200);
+  if(r){
+    const reply=typeof r[1]==='function'?r[1]():r[1];
+    if(reply)setTimeout(()=>{kkPush('them',reply);kkRefresh();},1100);
+  }
+  else if(/헤어져요/.test(n))setTimeout(()=>kkIncomingCall(),1200);
   else if(/잘못눌렀어요/.test(n) && hangupReplyExpected){
     // 문대 씨가 먼저 '왜 끊냐'고 보낸 뒤에만 답장으로 재통화한다.
     hangupReplyExpected=false;
-    callBackScriptPending=true;
-    setTimeout(kkIncomingCall,1400);
+    setTimeout(()=>kkIncomingCall(CALL_SCRIPT_RECALL),1400);
   }
 }
-function kkIncomingCall(){
+function kkIncomingCall(script){
   if(document.getElementById('callIn'))return;
   const ph='<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.600 10.800a15 15 0 0 0 6.600 6.600l2.200-2.200a1 1 0 0 1 1-.25 11.400 11.400 0 0 0 3.600.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.500a1 1 0 0 1 1 1c0 1.250.2 2.450.57 3.600a1 1 0 0 1-.25 1z"/></svg>';
   const bub='<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3C6.500 3 2.500 6.500 2.500 11c0 2.500 1.300 4.700 3.400 6.200L5 21l4.200-2.200c.9.2 1.800.3 2.800.3 5.500 0 9.500-3.500 9.500-8S17.500 3 12 3z"/></svg>';
@@ -723,15 +751,15 @@ function kkIncomingCall(){
     const sub=document.getElementById('ciSub'),bt=document.getElementById('ciBtns');
     if(!sub||!bt)return;
     bt.classList.add('off');sub.textContent='연결 중...';
-    if(callBackScriptPending){
+    if(script){
       setTimeout(()=>{
         if(!document.getElementById('callIn'))return;
         close();
-        callBackScriptPending=false;
-        startCallMoondae(CALL_SCRIPT_RECALL,true);
+        startCallMoondae(script,true);
       },900);
       return;
     }
+    breakupCallAnswered=true;
     setTimeout(()=>{if(document.getElementById('callIn'))sub.textContent='통화 종료';},1000);
     setTimeout(()=>{if(document.getElementById('callIn'))close();},1800);
   });
@@ -900,9 +928,14 @@ function openNote(i){
     <div class="nt-tools">${NT.svg(NT.list)}${NT.svg(NT.clip)}${NT.svg(NT.pen)}${NT.svg(NT.compose)}</div>`;
 }
 const CALL_SCRIPT=[['박문대','왜'],['신재현','그냥요'],['박문대','무슨 일인데'],['신재현','방금 부동산 갔다 왔어요'],['박문대','집 보러?'],['신재현','문대 씨가 동거하고 싶다면서요'],['신재현','아니에요?'],['박문대','나도 알아볼 생각이었는데 나랑 같이 가지 그랬냐'],['박문대','일단 지금 너네 집으로 갈게'],['신재현','네']];
+const CALL_SCRIPT_LOVE=[['박문대','어'],['박문대','사랑해'],['박문대','이 말 하려고 전화 걸었다'],['박문대','끊어']];
+const CALL_SCRIPT_RETRY=[['박문대','이번에도 끊으면 다시 안 건다'],['신재현','네^^'],['신재현','오고 있어요?'],['박문대','거의 다 와가는데'],['박문대','왜'],['신재현','아뇨 그냥'],['신재현','빨리 왔으면 좋겠어서요'],['박문대','무슨 일 있냐?'],['신재현','없어요 딱히'],['박문대','솔직하게 말해주기로 했잖아'],['신재현','목소리 듣고 싶어서요'],['박문대','뭐?',1000],['박문대','곧 들을 건데 뭐하러'],['신재현','왔어요?'],['박문대','어떻게 알았냐'],['신재현','발소리가 들리길래'],['박문대','귀신 같은 놈'],['박문대','들어간다']];
+const CALL_SCRIPT_SECOND=[['박문대','왜'],['신재현','오고 있어요?'],...CALL_SCRIPT_RETRY.slice(3)];
 const CALL_SCRIPT_RECALL=[['박문대','그래서'],['박문대','왜 전화했는데'],['신재현','방금 부동산 갔다 왔어요'],...CALL_SCRIPT.slice(4)];
-function startCallMoondae(script=CALL_SCRIPT,isCallback=false){
+function startCallMoondae(script,isCallback=false){
   if(document.getElementById('callOut'))return;
+  // 첫 통화를 중간에 끊은 뒤 다시 거는 두 번째 통화는 '왜' / '오고 있어요?'로 시작하는 대본을 쓴다.
+  if(!script)script=(!isCallback&&moondaeCallOutcomes.length===1&&moondaeCallOutcomes[0]==='cut')?CALL_SCRIPT_SECOND:CALL_SCRIPT;
   const ic=(document.querySelector('.lock-status-icons')||{}).innerHTML||'';
   const sv=(d,x)=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" ${x||''}>${d}</svg>`;
   const wave='<svg class="wv" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 10v4M8 7v10M12 4v16M16 8v8"/><circle cx="19.500" cy="16.500" r="2.500"/></svg>';
@@ -930,17 +963,21 @@ function startCallMoondae(script=CALL_SCRIPT,isCallback=false){
   const later=(fn,ms)=>{const t=setTimeout(()=>{if(alive())fn();},ms);timers.push(t);};
   const sub=document.getElementById('coSub'),cap=document.getElementById('coCap'),cn=document.getElementById('coN'),ct=document.getElementById('coT');
   const fmt=n=>String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0');
-  const notifyKakaoHangup=()=>{
+  const notifyKakaoHangup=(kind)=>{
+    const repeat=kind==='repeat';
+    const msg=repeat?'자꾸 끊을 거냐?':'왜 끊냐';
     // 문대 씨가 먼저 '왜 끊냐'고 보낸 뒤에만 해당 답장으로 재통화할 수 있다.
-    hangupReplyExpected=true;
-    kkPush('them','왜 끊냐');
+    hangupReplyExpected=!repeat;
+    repeatHangupReplyExpected=repeat;
+    kkPush('them',msg);
     const old=document.getElementById('callKakaoNotice');
     if(old)old.remove();
     const notice=document.createElement('div');
     notice.id='callKakaoNotice';
     notice.className='call-kakao-notice';
     notice.setAttribute('role','status');
-    notice.innerHTML='<div class="ckn-icon">●</div><div class="ckn-copy"><div class="ckn-head"><span>문대 씨 · 카카오톡</span><span class="ckn-time">지금</span></div><div class="ckn-msg">왜 끊냐</div></div>';
+    notice.innerHTML='<div class="ckn-icon">●</div><div class="ckn-copy"><div class="ckn-head"><span>문대 씨 · 카카오톡</span><span class="ckn-time">지금</span></div><div class="ckn-msg"></div></div>';
+    notice.querySelector('.ckn-msg').textContent=msg;
     notice.addEventListener('click',()=>{
       notice.remove();
       renderKakao();
@@ -953,7 +990,14 @@ function startCallMoondae(script=CALL_SCRIPT,isCallback=false){
     timers.forEach(clearTimeout);clearInterval(tick);
     cap.classList.remove('on');
     if(sub)sub.textContent='통화 종료';
-    if(manual&&!isCallback)setTimeout(()=>{notifyKakaoHangup();},2000);
+    if(!isCallback){
+      // 첫 통화를 끊어서 '왜 끊냐'가 온 뒤, 두 번째 통화도 중간에 끊으면 2초 뒤 '자꾸 끊을 거냐?'가 온다.
+      const nth=moondaeCallOutcomes.length,firstCut=moondaeCallOutcomes[0]==='cut';
+      moondaeCallOutcomes.push(manual?'cut':'full');
+      // '왜 끊냐'는 첫 통화를 끊었을 때만, '자꾸 끊을 거냐?'는 그다음 통화를 끊었을 때만 온다. 그 외에는 카톡이 오지 않는다.
+      const kind=nth===0?'first':(nth===1&&firstCut?'repeat':null);
+      if(manual&&kind)setTimeout(()=>{notifyKakaoHangup(kind);},2000);
+    }
     setTimeout(()=>{if(alive()){overlay.innerHTML='';}},900);
   };
   document.getElementById('coEnd').addEventListener('click',()=>finish(true));
@@ -965,9 +1009,12 @@ function startCallMoondae(script=CALL_SCRIPT,isCallback=false){
     script.forEach((l,i)=>{
       later(()=>{
         cap.classList.remove('on');
-        setTimeout(()=>{if(!alive())return;cn.textContent=l[0];ct.textContent=l[1];cap.classList.add('on');},300);
+        setTimeout(()=>{if(!alive()||ended)return;cn.textContent=l[0];ct.textContent=l[1];cap.classList.add('on');},300);
       },t);
-      t+=1900+l[1].length*95;
+      if(l[2]){ // 세 번째 값: 대사 뒤에 말없이 흐르는 적막(ms)
+        later(()=>cap.classList.remove('on'),t+1400);
+        t+=1100+l[2];
+      }else t+=1900+l[1].length*95;
     });
     later(finish,t+500);
   },2400);
